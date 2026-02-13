@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import duckdb
 import plotly.express as px
+import plotly.graph_objects as go  # Pour des graphiques plus avancés (gauge, heatmap...)
+from datetime import datetime       # Pour afficher la date de dernière mise à jour
 
 # --- CONFIGURATION INITIALE ---
 st.set_page_config(
@@ -10,6 +12,11 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# --- HORODATAGE DE SESSION ---
+# Stocke l'heure de début de session pour l'afficher plus tard
+if "session_start" not in st.session_state:
+    st.session_state.session_start = datetime.now().strftime("%d/%m/%Y %H:%M")
 
 # --- GESTION DU THÈME (DARK / LIGHT) ---
 with st.sidebar:
@@ -103,6 +110,11 @@ def load_data(file):
     ]
     return df
 
+def download_button(df, filename, label="📥 Télécharger en CSV"):
+    """Propose un bouton de téléchargement pour n'importe quel DataFrame."""
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(label=label, data=csv, file_name=filename, mime='text/csv')
+
 def display_kpi(col, title, value, subtext=None, color="green"):
     """Affiche une carte KPI HTML stylisée."""
     delta_html = f"<div style='color:{color}; font-size: 0.8rem; font-weight: 500; margin-top: 5px;'>{subtext}</div>" if subtext else ""
@@ -113,6 +125,27 @@ def display_kpi(col, title, value, subtext=None, color="green"):
             {delta_html}
         </div>
     """, unsafe_allow_html=True)
+
+def display_gauge(value, title, max_val=100, color="#FF4B4B"):
+    """Affiche un indicateur de type jauge (gauge chart) avec Plotly."""
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        title={'text': title, 'font': {'size': 16, 'color': text_color}},
+        gauge={
+            'axis': {'range': [0, max_val], 'tickcolor': subtext_color},
+            'bar': {'color': color},
+            'bgcolor': card_bg,
+            'bordercolor': border_color,
+        },
+        number={'font': {'color': text_color}}
+    ))
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        height=200,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
 # --- INITIALISATION DUCKDB ---
 if "con" not in st.session_state:
@@ -140,6 +173,16 @@ with st.sidebar:
         
     st.markdown("---")
     st.caption("v2.1.0 - Powered by DuckDB & Plotly")
+
+    # --- INFO SESSION ---
+    st.markdown("---")
+    st.markdown(f"🕐 Session démarrée : `{st.session_state.session_start}`")
+    
+    # Bouton pour réinitialiser toutes les données chargées
+    if st.button("🗑️ Réinitialiser les données"):
+        st.session_state.con = duckdb.connect(database=":memory:")
+        st.cache_data.clear()
+        st.rerun()
 
 # --- TABS PRINCIPAUX ---
 tab_amazon, tab_mental = st.tabs(["🎬 Amazon Prime Intelligence", "🧠 Student Well-being Analysis"])
@@ -218,6 +261,37 @@ with tab_amazon:
                            template=viz_template)
         st.plotly_chart(fig_line, use_container_width=True)
 
+        # --- EXPORT & STATISTIQUES AVANCÉES ---
+        st.markdown("### 📊 Statistiques Avancées")
+        
+        adv_col1, adv_col2 = st.columns(2)
+        
+        with adv_col1:
+            # Top 5 des réalisateurs les plus prolifiques
+            st.markdown("**Top 5 Réalisateurs**")
+            df_directors = con.execute(f"""
+                SELECT director as Réalisateur, COUNT(*) as Nb_Titres
+                FROM amazon
+                WHERE release_year = {selected_year} AND director IS NOT NULL AND director != ''
+                GROUP BY director ORDER BY Nb_Titres DESC LIMIT 5
+            """).fetchdf()
+            st.dataframe(df_directors, use_container_width=True, hide_index=True)
+        
+        with adv_col2:
+            # Top 5 des pays producteurs
+            st.markdown("**Top 5 Pays Producteurs**")
+            df_countries = con.execute(f"""
+                SELECT country as Pays, COUNT(*) as Nb_Titres
+                FROM amazon
+                WHERE release_year = {selected_year} AND country IS NOT NULL AND country != ''
+                GROUP BY country ORDER BY Nb_Titres DESC LIMIT 5
+            """).fetchdf()
+            st.dataframe(df_countries, use_container_width=True, hide_index=True)
+        
+        # Bouton de téléchargement des données filtrées
+        df_export = con.execute(f"SELECT * FROM amazon WHERE release_year = {selected_year}").fetchdf()
+        download_button(df_export, f"amazon_{selected_year}.csv", f"📥 Exporter données {selected_year}")
+
     else:
         st.info("Veuillez charger le fichier Amazon pour activer la vue Intelligence.")
 
@@ -277,6 +351,30 @@ with tab_mental:
                                   template=viz_template)
             st.plotly_chart(fig_pie, use_container_width=True)
 
+        # --- JAUGES VISUELLES ---
+        st.markdown("#### 📈 Indicateurs Visuels")
+        gauge_cols = st.columns(3)
+        with gauge_cols[0]:
+            display_gauge(round(stats[1]/stats[0]*100) if stats[0] else 0, "Dépression (%)", color="#e74c3c")
+        with gauge_cols[1]:
+            display_gauge(round(stats[2]/stats[0]*100) if stats[0] else 0, "Anxiété (%)", color="#e67e22")
+        with gauge_cols[2]:
+            display_gauge(round(stats[3]/stats[0]*100) if stats[0] else 0, "Panique (%)", color="#9b59b6")
+
+        # --- HEATMAP : CGPA vs TROUBLES ---
+        st.markdown("#### 🔥 Heatmap : CGPA vs Dépression")
+        df_heatmap = con.execute("""
+            SELECT what_is_your_cgpa as CGPA, do_you_have_depression as Depression, COUNT(*) as Count
+            FROM mental
+            WHERE what_is_your_cgpa IS NOT NULL
+            GROUP BY CGPA, Depression
+        """).fetchdf()
+        fig_heat = px.density_heatmap(df_heatmap, x="CGPA", y="Depression", z="Count",
+                                       color_continuous_scale="RdYlGn_r",
+                                       template=viz_template)
+        fig_heat.update_layout(height=300)
+        st.plotly_chart(fig_heat, use_container_width=True)
+
         # EXPLORATEUR
         st.markdown("#### 🔬 Explorateur de Données")
         with st.expander("Ouvrir la table de données brute"):
@@ -290,5 +388,17 @@ with tab_mental:
             
             st.dataframe(con.execute(query).fetchdf(), use_container_width=True)
 
+            # Bouton d'export des données affichées
+            df_displayed = con.execute(query).fetchdf()
+            download_button(df_displayed, "mental_health_export.csv", "📥 Exporter cette vue")
+
     else:
         st.info("Veuillez charger le fichier Santé Mentale pour activer la vue Analyse.")
+
+# --- FOOTER GLOBAL ---
+st.markdown("---")
+st.markdown(f"""
+<div style="text-align: center; color: {subtext_color}; font-size: 0.75rem; padding: 10px 0;">
+    Data Analytics Hub · Propulsé par Streamlit, DuckDB & Plotly · Session du {st.session_state.session_start}
+</div>
+""", unsafe_allow_html=True)
